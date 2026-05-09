@@ -1,0 +1,6 @@
+PySide6>=6.5.0
+SQLAlchemy>=2.0.0
+psycopg2-binary>=2.9.0
+Pillow>=10.0.0
+rawpy>=0.18.0
+pillow-heif>=0.14.0
