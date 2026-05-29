@@ -3,26 +3,29 @@ import logging
 
 from PySide6.QtCore import Qt, QThread
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
+    QListWidget,
+    QListWidgetItem,
     QMenu,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QSplitter,
     QStatusBar,
     QToolBar,
     QTreeWidget,
     QTreeWidgetItem,
-    QVBoxLayout,
     QWidget,
 )
 
-from core.database import SessionLocal
 from core.models import Album, Folder, Image
 from core.queries import get_distinct_classifications, parse_classify_key
+from core.query_worker import abort_query, run_query
 from core.scanner import ScanWorker
 from ui.image_viewer import ImageViewerDialog
 from ui.property_panel import PropertyPanel
@@ -41,6 +44,10 @@ class MainWindow(QMainWindow):
 
         self._scan_thread: QThread | None = None
         self._scan_worker: ScanWorker | None = None
+        self._pending_sidebar_query = (None, None)
+        self._pending_search_query = (None, None)
+        self._pending_detail_query = (None, None)
+        self._detail_query_seq = 0  # 查询序列号，防止旧回调覆盖新数据
 
         self._setup_toolbar()
         self._setup_central_widget()
@@ -72,6 +79,26 @@ class MainWindow(QMainWindow):
         btn_search.clicked.connect(self._on_search)
         toolbar.addWidget(btn_search)
 
+        toolbar.addSeparator()
+
+        toolbar.addWidget(QLabel(" 缩略图: "))
+        self._size_group = QButtonGroup(self)
+        for size_key, label in [("small", "小"), ("medium", "中"), ("large", "大")]:
+            btn = QRadioButton(label)
+            btn.setProperty("size_key", size_key)
+            self._size_group.addButton(btn)
+            toolbar.addWidget(btn)
+            if size_key == "medium":
+                btn.setChecked(True)
+        self._size_group.buttonClicked.connect(self._on_thumb_size_changed)
+
+        toolbar.addSeparator()
+
+        self._btn_zip = QPushButton("打包下载")
+        self._btn_zip.setEnabled(False)
+        self._btn_zip.clicked.connect(self._on_zip_download)
+        toolbar.addWidget(self._btn_zip)
+
     def _setup_central_widget(self):
         central = QWidget()
         self.setCentralWidget(central)
@@ -92,6 +119,8 @@ class MainWindow(QMainWindow):
         self.thumbnail_grid.image_selected.connect(self._on_image_selected)
         self.thumbnail_grid.image_double_clicked.connect(self._on_image_double_clicked)
         self.thumbnail_grid.context_action.connect(self._on_context_action)
+        self.thumbnail_grid.load_finished.connect(self._on_thumb_load_finished)
+        self.thumbnail_grid.selection_changed.connect(self._on_selection_changed)
         splitter.addWidget(self.thumbnail_grid)
 
         # 右侧属性面板
@@ -100,26 +129,112 @@ class MainWindow(QMainWindow):
 
         splitter.setSizes([200, 800, 250])
 
+    def _on_thumb_size_changed(self, button):
+        """缩略图尺寸切换"""
+        size_key = button.property("size_key")
+        if size_key:
+            self.thumbnail_grid.set_thumb_size(size_key)
+
+    def _on_thumb_load_finished(self, count: int, desc: str):
+        """缩略图加载完成，更新状态栏"""
+        if count > 0:
+            self._statusbar.showMessage(f"{desc} (共{count}张)")
+        else:
+            self._statusbar.showMessage(f"{desc} (无图片)")
+
+    def _on_selection_changed(self, count: int):
+        """选中图片数量变化"""
+        self._btn_zip.setEnabled(count > 0)
+
+    def _on_zip_download(self):
+        """打包下载选中图片"""
+        image_ids = self.thumbnail_grid.get_selected_image_ids()
+        if not image_ids:
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "保存打包文件", "images.zip", "Zip 文件 (*.zip)"
+        )
+        if not file_path:
+            return
+
+        from core.zip_worker import ZipWorker
+        from ui.thread_utils import stop_thread
+
+        self._zip_thread = QThread()
+        self._zip_worker = ZipWorker(image_ids, file_path)
+        self._zip_worker.moveToThread(self._zip_thread)
+
+        self._zip_worker.progress.connect(self._on_zip_progress)
+        self._zip_worker.finished.connect(self._on_zip_finished)
+        self._zip_worker.error.connect(self._on_zip_error)
+
+        self._zip_thread.started.connect(self._zip_worker.run)
+        self._zip_thread.start()
+        self._btn_zip.setEnabled(False)
+        self._statusbar.showMessage("正在打包...")
+
+    def _on_zip_progress(self, current: int, total: int):
+        self._statusbar.showMessage(f"打包中: {current}/{total}")
+
+    def _on_zip_finished(self, path: str):
+        self._statusbar.showMessage(f"打包完成: {path}")
+        self._btn_zip.setEnabled(True)
+        self._cleanup_zip_thread()
+
+    def _on_zip_error(self, msg: str):
+        self._statusbar.showMessage(f"打包出错: {msg}")
+        self._btn_zip.setEnabled(True)
+        self._cleanup_zip_thread()
+
+    def _cleanup_zip_thread(self):
+        if hasattr(self, "_zip_thread") and self._zip_thread:
+            from ui.thread_utils import stop_thread
+            stop_thread(self._zip_thread)
+            self._zip_thread = None
+            self._zip_worker = None
+
     def _create_sidebar(self) -> QWidget:
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        layout.setContentsMargins(4, 4, 4, 4)
+        from ui.accordion_sidebar import AccordionSidebar
 
-        self._tree = QTreeWidget()
-        self._tree.setHeaderHidden(True)
-        self._tree.itemClicked.connect(self._on_sidebar_clicked)
-        self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self._tree.customContextMenuRequested.connect(self._on_sidebar_context_menu)
-        self._tree.setEditTriggers(QTreeWidget.EditTrigger.DoubleClicked)
-        self._tree.itemChanged.connect(self._on_sidebar_item_changed)
-        self._tree.setAcceptDrops(True)
-        self._tree.setDropIndicatorShown(True)
-        self._tree.dragEnterEvent = self._on_tree_drag_enter
-        self._tree.dragMoveEvent = self._on_tree_drag_move
-        self._tree.dropEvent = self._on_tree_drop
+        self._sidebar_accordion = AccordionSidebar()
 
-        layout.addWidget(self._tree)
-        return widget
+        # 全部图片
+        self._btn_all = QPushButton("查看全部图片")
+        self._btn_all.clicked.connect(self._on_show_all)
+        self._sidebar_accordion.add_section("全部图片", self._btn_all)
+
+        # 索引文件夹
+        self._folders_list = QListWidget()
+        self._folders_list.itemClicked.connect(self._on_folder_clicked)
+        self._folders_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._folders_list.customContextMenuRequested.connect(self._on_folder_context_menu)
+        self._folders_section = self._sidebar_accordion.add_section("索引文件夹", self._folders_list)
+
+        # 导入库
+        self._btn_imported = QPushButton("查看已导入图片")
+        self._btn_imported.clicked.connect(self._on_show_imported)
+        self._sidebar_accordion.add_section("导入库", self._btn_imported)
+
+        # 项目分类（保留 QTreeWidget 支持拖拽和重命名）
+        self._classification_tree = QTreeWidget()
+        self._classification_tree.setHeaderHidden(True)
+        self._classification_tree.itemClicked.connect(self._on_classification_clicked)
+        self._classification_tree.setEditTriggers(QTreeWidget.EditTrigger.DoubleClicked)
+        self._classification_tree.itemChanged.connect(self._on_sidebar_item_changed)
+        self._classification_tree.setAcceptDrops(True)
+        self._classification_tree.setDropIndicatorShown(True)
+        self._classification_tree.dragEnterEvent = self._on_tree_drag_enter
+        self._classification_tree.dragMoveEvent = self._on_tree_drag_move
+        self._classification_tree.dropEvent = self._on_tree_drop
+        self._sidebar_accordion.add_section("项目分类", self._classification_tree)
+
+        # 相册
+        self._albums_list = QListWidget()
+        self._albums_list.itemClicked.connect(self._on_album_clicked)
+        self._sidebar_accordion.add_section("相册", self._albums_list)
+
+        return self._sidebar_accordion
 
     def _setup_statusbar(self):
         self._statusbar = QStatusBar()
@@ -127,134 +242,102 @@ class MainWindow(QMainWindow):
         self._statusbar.showMessage("就绪")
 
     def _load_sidebar_folders(self):
-        """从数据库加载侧边栏节点"""
-        self._tree.blockSignals(True)
-        self._tree.clear()
+        """从数据库加载侧边栏各区块内容（异步）"""
+        worker, thread = self._pending_sidebar_query
+        abort_query(thread, worker)
+        worker, thread = run_query(self, self._query_sidebar_data, on_result=self._on_sidebar_data_loaded)
+        self._pending_sidebar_query = (worker, thread)
 
-        root = QTreeWidgetItem(self._tree, ["全部图片"])
-        root.setData(0, Qt.ItemDataRole.UserRole, "all")
+    def _query_sidebar_data(self, db):
+        """查询侧边栏数据（后台线程）"""
+        folders = db.execute(select(Folder)).scalars().all()
+        combos = get_distinct_classifications(db)
+        albums = db.execute(select(Album)).scalars().all()
+        return (folders, combos, albums)
+
+    def _on_sidebar_data_loaded(self, data):
+        """侧边栏数据加载完成（主线程更新 UI）"""
+        folders, combos, albums = data
 
         # 索引文件夹
-        folders_node = QTreeWidgetItem(root, ["索引文件夹"])
-        folders_node.setData(0, Qt.ItemDataRole.UserRole, "folders_root")
+        self._folders_list.clear()
+        for folder in folders:
+            item = QListWidgetItem(folder.path)
+            item.setData(Qt.ItemDataRole.UserRole, f"folder:{folder.id}")
+            self._folders_list.addItem(item)
 
-        db = SessionLocal()
-        try:
-            folders = db.execute(select(Folder)).scalars().all()
-            for folder in folders:
-                item = QTreeWidgetItem(folders_node, [folder.path])
-                item.setData(0, Qt.ItemDataRole.UserRole, f"folder:{folder.id}")
+        # 项目分类（二级树）
+        self._classification_tree.blockSignals(True)
+        self._classification_tree.clear()
+        tree: dict[str, set[str]] = {}
+        for ptype, sname in combos:
+            ptype = ptype or ""
+            sname = sname or ""
+            tree.setdefault(ptype, set())
+            if sname:
+                tree[ptype].add(sname)
+        for ptype, snames in tree.items():
+            type_item = QTreeWidgetItem(self._classification_tree, [ptype])
+            type_item.setData(0, Qt.ItemDataRole.UserRole, f"ptype:{ptype}")
+            type_item.setFlags(type_item.flags() | Qt.ItemFlag.ItemIsEditable)
+            for sname in snames:
+                style_item = QTreeWidgetItem(type_item, [sname])
+                style_item.setData(
+                    0, Qt.ItemDataRole.UserRole,
+                    f"style:{ptype}|{sname}",
+                )
+                style_item.setFlags(style_item.flags() | Qt.ItemFlag.ItemIsEditable)
+        self._classification_tree.blockSignals(False)
+        self._classification_tree.expandAll()
 
-            # 导入库
-            imported_node = QTreeWidgetItem(root, ["导入库"])
-            imported_node.setData(0, Qt.ItemDataRole.UserRole, "imported")
+        # 相册
+        self._albums_list.clear()
+        for album in albums:
+            item = QListWidgetItem(album.name)
+            item.setData(Qt.ItemDataRole.UserRole, f"album:{album.id}")
+            self._albums_list.addItem(item)
 
-            # 项目分类（二级树：项目类型 → 风格）
-            projects_node = QTreeWidgetItem(root, ["项目分类"])
-            projects_node.setData(0, Qt.ItemDataRole.UserRole, "projects_root")
+    def _on_show_all(self):
+        """查看全部图片"""
+        self.thumbnail_grid.load_images()
+        self._statusbar.showMessage("加载全部图片...")
 
-            combos = get_distinct_classifications(db)
+    def _on_folder_clicked(self, item: QListWidgetItem):
+        """索引文件夹点击"""
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if not data or not data.startswith("folder:"):
+            return
+        folder_id = int(data.split(":")[1])
+        self.thumbnail_grid.load_images(folder_id=folder_id)
+        self._statusbar.showMessage("加载文件夹...")
 
-            # 构建嵌套 dict: {ptype: set(sname)}
-            tree: dict[str, set[str]] = {}
-            for ptype, sname in combos:
-                ptype = ptype or ""
-                sname = sname or ""
-                tree.setdefault(ptype, set())
-                if sname:
-                    tree[ptype].add(sname)
+    def _on_show_imported(self):
+        """查看已导入图片"""
+        self.thumbnail_grid.load_images(imported_only=True)
+        self._statusbar.showMessage("加载导入库...")
 
-            for ptype, snames in tree.items():
-                type_item = QTreeWidgetItem(projects_node, [ptype])
-                type_item.setData(0, Qt.ItemDataRole.UserRole, f"ptype:{ptype}")
-                type_item.setFlags(type_item.flags() | Qt.ItemFlag.ItemIsEditable)
-                for sname in snames:
-                    style_item = QTreeWidgetItem(type_item, [sname])
-                    style_item.setData(
-                        0, Qt.ItemDataRole.UserRole,
-                        f"style:{ptype}|{sname}",
-                    )
-                    style_item.setFlags(style_item.flags() | Qt.ItemFlag.ItemIsEditable)
-
-            # 相册
-            albums_node = QTreeWidgetItem(root, ["相册"])
-            albums_node.setData(0, Qt.ItemDataRole.UserRole, "albums_root")
-            albums = db.execute(select(Album)).scalars().all()
-            for album in albums:
-                item = QTreeWidgetItem(albums_node, [album.name])
-                item.setData(0, Qt.ItemDataRole.UserRole, f"album:{album.id}")
-
-            # 标签（占位）
-            tags_node = QTreeWidgetItem(root, ["标签"])
-            tags_node.setData(0, Qt.ItemDataRole.UserRole, "tags_root")
-        finally:
-            db.close()
-
-        self._tree.blockSignals(False)
-        self._tree.expandAll()
-
-    def _on_sidebar_clicked(self, item: QTreeWidgetItem, column: int):
-        """侧边栏节点点击"""
+    def _on_classification_clicked(self, item: QTreeWidgetItem, column: int):
+        """项目分类树点击"""
         data = item.data(0, Qt.ItemDataRole.UserRole)
-        if data is None:
+        if not data:
             return
+        if data.startswith("style:"):
+            ptype, sname = parse_classify_key(data)
+            self.thumbnail_grid.load_images(project_type=ptype, style_name=sname)
+            self._statusbar.showMessage(f"加载 {ptype} / {sname}...")
+        elif data.startswith("ptype:"):
+            ptype = data[len("ptype:"):]
+            self.thumbnail_grid.load_images(project_type=ptype)
+            self._statusbar.showMessage(f"加载 {ptype}...")
 
-        # 分类根节点仅展开/折叠，不加载图片
-        if data in ("folders_root", "projects_root", "albums_root", "tags_root"):
+    def _on_album_clicked(self, item: QListWidgetItem):
+        """相册点击"""
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if not data or not data.startswith("album:"):
             return
-
-        db = SessionLocal()
-        try:
-            if data == "all":
-                self.thumbnail_grid.load_images(db, folder_id=None)
-                total = db.query(func.count(Image.id)).scalar() or 0
-                self._statusbar.showMessage(f"显示全部图片 (共{total}张)")
-            elif data.startswith("folder:"):
-                folder_id = int(data.split(":")[1])
-                self.thumbnail_grid.load_images(db, folder_id=folder_id)
-                folder = db.get(Folder, folder_id)
-                if folder:
-                    count = db.query(func.count(Image.id)).filter(
-                        Image.folder_id == folder_id
-                    ).scalar() or 0
-                    self._statusbar.showMessage(
-                        f"显示文件夹: {folder.path} ({count}张)"
-                    )
-            elif data == "imported":
-                self.thumbnail_grid.load_images(db, imported_only=True)
-                count = db.query(func.count(Image.id)).filter(
-                    Image.imported == True
-                ).scalar() or 0
-                self._statusbar.showMessage(f"显示导入库图片 (共{count}张)")
-            elif data.startswith("style:"):
-                ptype, sname = parse_classify_key(data)
-                self.thumbnail_grid.load_images(
-                    db, project_type=ptype, style_name=sname,
-                )
-                count = db.query(func.count(Image.id)).filter(
-                    Image.project_type == ptype,
-                    Image.style_name == sname,
-                ).scalar() or 0
-                label = f"{ptype} / {sname}"
-                self._statusbar.showMessage(f"{label} ({count}张)")
-            elif data.startswith("ptype:"):
-                ptype = data[len("ptype:"):]
-                self.thumbnail_grid.load_images(
-                    db, project_type=ptype,
-                )
-                count = db.query(func.count(Image.id)).filter(
-                    Image.project_type == ptype,
-                ).scalar() or 0
-                self._statusbar.showMessage(f"{ptype} ({count}张)")
-            elif data.startswith("album:"):
-                album_id = int(data[len("album:"):])
-                self.thumbnail_grid.load_images(db, album_id=album_id)
-                album = db.get(Album, album_id)
-                name = album.name if album else "未知"
-                count = len(album.images) if album else 0
-                self._statusbar.showMessage(f"相册: {name} ({count}张)")
-        finally:
-            db.close()
+        album_id = int(data[len("album:"):])
+        self.thumbnail_grid.load_images(album_id=album_id)
+        self._statusbar.showMessage("加载相册...")
 
     def _on_sidebar_item_changed(self, item: QTreeWidgetItem, column: int):
         """侧边栏节点重命名"""
@@ -266,61 +349,52 @@ class MainWindow(QMainWindow):
         if not new_name:
             return
 
-        # 解析节点类型和旧值
         if data.startswith("ptype:"):
             old_ptype = data[len("ptype:"):]
             if new_name == old_ptype:
                 return
-            db = SessionLocal()
-            try:
-                count = db.query(func.count(Image.id)).filter(
-                    Image.project_type == old_ptype
-                ).scalar() or 0
-                reply = QMessageBox.question(
-                    self, "确认重命名",
-                    f"将 {count} 张图片的项目类型从「{old_ptype}」改为「{new_name}」",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                )
-                if reply == QMessageBox.StandardButton.Yes:
-                    db.query(Image).filter(
-                        Image.project_type == old_ptype
-                    ).update({Image.project_type: new_name})
-                    db.commit()
-                    self._statusbar.showMessage(f"已重命名: {old_ptype} → {new_name}")
-                    self._load_sidebar_folders()
-                else:
-                    # 用户取消，恢复原名
-                    self._load_sidebar_folders()
-            finally:
-                db.close()
+            reply = QMessageBox.question(
+                self, "确认重命名",
+                f"将项目类型从「{old_ptype}」改为「{new_name}」",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._run_rename_query("ptype", old_ptype, new_name)
+            else:
+                self._load_sidebar_folders()
         elif data.startswith("style:"):
             ptype, old_sname = data[len("style:"):].split("|", 1)
             if new_name == old_sname:
                 return
-            db = SessionLocal()
-            try:
-                count = db.query(func.count(Image.id)).filter(
+            reply = QMessageBox.question(
+                self, "确认重命名",
+                f"将风格从「{old_sname}」改为「{new_name}」",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._run_rename_query("style", old_sname, new_name, ptype)
+            else:
+                self._load_sidebar_folders()
+
+    def _run_rename_query(self, rename_type: str, old_name: str, new_name: str, ptype: str = ""):
+        """异步执行重命名"""
+        def do_rename(db):
+            if rename_type == "ptype":
+                db.query(Image).filter(
+                    Image.project_type == old_name
+                ).update({Image.project_type: new_name})
+            else:
+                db.query(Image).filter(
                     Image.project_type == ptype,
-                    Image.style_name == old_sname,
-                ).scalar() or 0
-                reply = QMessageBox.question(
-                    self, "确认重命名",
-                    f"将 {count} 张图片的风格从「{old_sname}」改为「{new_name}」",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                )
-                if reply == QMessageBox.StandardButton.Yes:
-                    db.query(Image).filter(
-                        Image.project_type == ptype,
-                        Image.style_name == old_sname,
-                    ).update({Image.style_name: new_name})
-                    db.commit()
-                    self._statusbar.showMessage(f"已重命名: {old_sname} → {new_name}")
-                    self._load_sidebar_folders()
-                else:
-                    # 用户取消，恢复原名
-                    self._load_sidebar_folders()
-            finally:
-                db.close()
+                    Image.style_name == old_name,
+                ).update({Image.style_name: new_name})
+            db.commit()
+
+        def on_done():
+            self._statusbar.showMessage(f"已重命名: {old_name} → {new_name}")
+            self._load_sidebar_folders()
+
+        run_query(self, do_rename, on_finished=on_done)
 
     def _on_tree_drag_enter(self, event):
         """接受来自缩略图的拖拽"""
@@ -332,12 +406,12 @@ class MainWindow(QMainWindow):
     def _on_tree_drag_move(self, event):
         """拖拽过程中高亮目标节点"""
         if event.mimeData().hasFormat("application/x-image-ids"):
-            item = self._tree.itemAt(event.position().toPoint())
+            item = self._classification_tree.itemAt(event.position().toPoint())
             if item:
                 data = item.data(0, Qt.ItemDataRole.UserRole)
                 if data and (data.startswith("ptype:") or data.startswith("style:")):
                     event.acceptProposedAction()
-                    self._tree.setCurrentItem(item)
+                    self._classification_tree.setCurrentItem(item)
                     return
             event.ignore()
         else:
@@ -349,7 +423,7 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
 
-        item = self._tree.itemAt(event.position().toPoint())
+        item = self._classification_tree.itemAt(event.position().toPoint())
         if not item:
             event.ignore()
             return
@@ -405,27 +479,27 @@ class MainWindow(QMainWindow):
             return
 
         from pathlib import Path
+        folder_path = str(Path(folder_str))
 
-        folder_path = Path(folder_str)
-
-        db = SessionLocal()
-        try:
+        def check_and_add(db):
             existing = db.execute(
-                select(Folder).where(Folder.path == str(folder_path))
+                select(Folder).where(Folder.path == folder_path)
             ).scalar_one_or_none()
             if existing:
-                self._statusbar.showMessage(f"文件夹已存在: {folder_path}")
-                return
-
-            folder = Folder(path=str(folder_path))
+                return None
+            folder = Folder(path=folder_path)
             db.add(folder)
             db.commit()
             db.refresh(folder)
-            folder_id = folder.id
-        finally:
-            db.close()
+            return folder.id
 
-        self._start_scan(folder_id, str(folder_path))
+        def on_result(folder_id):
+            if folder_id is None:
+                self._statusbar.showMessage(f"文件夹已存在: {folder_path}")
+            else:
+                self._start_scan(folder_id, folder_path)
+
+        run_query(self, check_and_add, on_result=on_result)
 
     def _start_scan(self, folder_id: int, folder_path: str):
         """启动后台扫描"""
@@ -449,12 +523,7 @@ class MainWindow(QMainWindow):
         self._statusbar.showMessage("扫描完成")
         self._cleanup_scan_thread()
         self._load_sidebar_folders()
-
-        db = SessionLocal()
-        try:
-            self.thumbnail_grid.load_images(db, folder_id=None)
-        finally:
-            db.close()
+        self.thumbnail_grid.load_images()
 
     def _on_scan_error(self, msg: str):
         self._statusbar.showMessage(f"扫描出错: {msg}")
@@ -466,12 +535,46 @@ class MainWindow(QMainWindow):
         self._scan_worker = None
 
     def _on_image_selected(self, image_id: int):
-        """图片选中，更新属性面板"""
-        db = SessionLocal()
-        try:
-            self.property_panel.show_image(image_id, db)
-        finally:
-            db.close()
+        """图片选中，更新属性面板（异步）"""
+        # 取消旧查询
+        worker, thread = self._pending_detail_query
+        abort_query(thread, worker)
+
+        # 递增序列号，确保只有最新回调执行
+        self._detail_query_seq += 1
+        current_seq = self._detail_query_seq
+
+        def on_result(data):
+            # 只有序列号匹配时才更新 UI
+            if current_seq == self._detail_query_seq:
+                self.property_panel.show_image_from_data(data)
+
+        worker, thread = run_query(self, self._query_image_detail, image_id=image_id,
+                  on_result=on_result)
+        self._pending_detail_query = (worker, thread)
+
+    def _query_image_detail(self, db, image_id: int):
+        """查询图片详情（后台线程）"""
+        image = db.get(Image, image_id)
+        if not image:
+            return None
+        return {
+            "file_name": image.file_name,
+            "file_path": image.file_path,
+            "file_size": image.file_size,
+            "width": image.width,
+            "height": image.height,
+            "format": image.format,
+            "color_space": image.color_space,
+            "created_at": image.created_at,
+            "modified_at": image.modified_at,
+            "exif_json": image.exif_json,
+            "project_type": image.project_type,
+            "style_name": image.style_name,
+            "imported": image.imported,
+            "storage_path": image.storage_path,
+            "thumb_path": image.thumb_path,
+        }
 
     def _on_image_double_clicked(self, image_id: int):
         """双击图片，打开大图预览"""
@@ -487,68 +590,70 @@ class MainWindow(QMainWindow):
         viewer.exec()
 
     def _on_search(self):
-        """搜索图片：ILIKE 中文子串匹配 + 全文搜索补充"""
+        """搜索图片（异步）"""
         keyword = self._search_input.text().strip()
         if not keyword:
             return
+        self._statusbar.showMessage(f"搜索 \"{keyword}\" ...")
+        worker, thread = self._pending_search_query
+        abort_query(thread, worker)
+        worker, thread = run_query(self, self._query_search, keyword=keyword,
+                  on_result=lambda results: self._on_search_results(keyword, results))
+        self._pending_search_query = (worker, thread)
 
+    def _query_search(self, db, keyword: str) -> list:
+        """搜索查询（后台线程）"""
         from sqlalchemy import or_, text
 
-        db = SessionLocal()
-        try:
-            terms = keyword.split()
-            conditions = []
-            for term in terms:
-                pattern = f"%{term}%"
-                conditions.append(Image.file_name.ilike(pattern))
-                conditions.append(Image.project_type.ilike(pattern))
-                conditions.append(Image.style_name.ilike(pattern))
+        terms = keyword.split()
+        conditions = []
+        for term in terms:
+            pattern = f"%{term}%"
+            conditions.append(Image.file_name.ilike(pattern))
+            conditions.append(Image.project_type.ilike(pattern))
+            conditions.append(Image.style_name.ilike(pattern))
 
-            stmt = (
-                select(Image)
-                .where(or_(*conditions))
-                .order_by(Image.id.desc())
-                .limit(200)
-            )
-            results = db.execute(stmt).scalars().all()
+        stmt = (
+            select(Image)
+            .where(or_(*conditions))
+            .order_by(Image.id.desc())
+            .limit(200)
+        )
+        results = db.execute(stmt).scalars().all()
 
-            if not results and len(terms) == 1:
-                tsquery = " & ".join(terms)
-                try:
-                    stmt_fts = (
-                        select(Image)
-                        .where(text("search_vector @@ to_tsquery('simple', :q)"))
-                        .order_by(text("ts_rank(search_vector, to_tsquery('simple', :q)) DESC"))
-                        .params(q=tsquery)
-                        .limit(200)
-                    )
-                    results = db.execute(stmt_fts).scalars().all()
-                except Exception:
-                    pass
+        if not results and len(terms) == 1:
+            tsquery = " & ".join(terms)
+            try:
+                stmt_fts = (
+                    select(Image)
+                    .where(text("search_vector @@ to_tsquery('simple', :q)"))
+                    .order_by(text("ts_rank(search_vector, to_tsquery('simple', :q)) DESC"))
+                    .params(q=tsquery)
+                    .limit(200)
+                )
+                results = db.execute(stmt_fts).scalars().all()
+            except Exception:
+                pass
 
-            self.thumbnail_grid.clear()
-            for img in results:
-                self.thumbnail_grid.add_image_item(img)
+        return results
 
-            self._statusbar.showMessage(f"搜索 \"{keyword}\": 找到 {len(results)} 张图片")
-        except Exception as e:
-            logger.error("搜索出错: %s", e)
-            self._statusbar.showMessage(f"搜索出错: {e}")
-        finally:
-            db.close()
+    def _on_search_results(self, keyword: str, results: list):
+        """搜索结果回调（主线程）"""
+        self.thumbnail_grid.add_images_from_search(results)
+        self._statusbar.showMessage(f"搜索 \"{keyword}\": 找到 {len(results)} 张图片")
 
-    def _on_sidebar_context_menu(self, pos):
-        """侧边栏右键菜单"""
-        item = self._tree.itemAt(pos)
+    def _on_folder_context_menu(self, pos):
+        """索引文件夹右键菜单"""
+        item = self._folders_list.itemAt(pos)
         if not item:
             return
-        data = item.data(0, Qt.ItemDataRole.UserRole)
+        data = item.data(Qt.ItemDataRole.UserRole)
         if not data or not data.startswith("folder:"):
             return
 
         menu = QMenu(self)
         action = menu.addAction("删除索引")
-        triggered = menu.exec(self._tree.viewport().mapToGlobal(pos))
+        triggered = menu.exec(self._folders_list.viewport().mapToGlobal(pos))
         if triggered == action:
             folder_id = int(data.split(":")[1])
             self._on_delete_folder(folder_id)
@@ -577,6 +682,61 @@ class MainWindow(QMainWindow):
             self._on_set_metadata(image_ids)
         elif action == "import":
             self._on_import_images(image_ids)
+        elif action == "copy_path":
+            self._on_copy_paths(image_ids)
+        elif action == "open_in_explorer":
+            self._on_open_in_explorer(image_ids)
+        elif action == "delete_records":
+            self._on_delete_records(image_ids)
+
+    def _on_copy_paths(self, image_ids: list):
+        """复制选中图片的文件路径到剪贴板"""
+        def query_paths(db):
+            images = db.query(Image.file_path).filter(Image.id.in_(image_ids)).all()
+            return [img.file_path for img in images]
+
+        def on_result(paths):
+            from PySide6.QtWidgets import QApplication
+            QApplication.clipboard().setText("\n".join(paths))
+            self._statusbar.showMessage(f"已复制 {len(paths)} 个文件路径到剪贴板")
+
+        run_query(self, query_paths, on_result=on_result)
+
+    def _on_open_in_explorer(self, image_ids: list):
+        """在资源管理器中打开第一个选中图片所在目录"""
+        def query_path(db):
+            img = db.query(Image.file_path).filter(Image.id == image_ids[0]).scalar()
+            return img
+
+        def on_result(file_path):
+            if file_path:
+                import subprocess
+                subprocess.Popen(f'explorer /select,"{file_path}"')
+
+        run_query(self, query_path, on_result=on_result)
+
+    def _on_delete_records(self, image_ids: list):
+        """从数据库删除选中图片记录（不删原文件）"""
+        reply = QMessageBox.question(
+            self, "确认删除",
+            f"将从数据库中删除 {len(image_ids)} 条图片记录。\n"
+            "原文件不会被删除。\n\n确定继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        def delete_records(db):
+            db.query(Image).filter(Image.id.in_(image_ids)).delete(synchronize_session=False)
+            db.commit()
+            return len(image_ids)
+
+        def on_done():
+            self._statusbar.showMessage("已删除记录")
+            self._load_sidebar_folders()
+            self.thumbnail_grid.load_images()
+
+        run_query(self, delete_records, on_finished=on_done)
 
     def _on_create_album(self):
         """工具栏新建相册"""
@@ -625,11 +785,7 @@ class MainWindow(QMainWindow):
     def _on_import_finished(self):
         """导入完成回调"""
         self._load_sidebar_folders()
-        db = SessionLocal()
-        try:
-            self.thumbnail_grid.load_images(db, imported_only=True)
-        finally:
-            db.close()
+        self.thumbnail_grid.load_images(imported_only=True)
         self._statusbar.showMessage("导入完成")
 
     def _run_album_worker(self, operation: str, **kwargs):

@@ -1,0 +1,208 @@
+/* Image Gallery - 全局样式（轻量工具风） */
+
+* {
+    font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+    font-size: 9pt;
+}
+
+QMainWindow {
+    background-color: #f5f5f5;
+}
+
+/* 工具栏 */
+QToolBar {
+    background-color: #ffffff;
+    border-bottom: 1px solid #e0e0e0;
+    padding: 4px 8px;
+    spacing: 4px;
+}
+
+QToolBar::separator {
+    width: 1px;
+    background-color: #e0e0e0;
+    margin: 2px 6px;
+}
+
+/* 按钮 */
+QPushButton {
+    background-color: #ffffff;
+    border: 1px solid #d0d0d0;
+    border-radius: 4px;
+    padding: 4px 12px;
+    min-height: 22px;
+}
+
+QPushButton:hover {
+    background-color: #f0f0f0;
+    border-color: #b0b0b0;
+}
+
+QPushButton:pressed {
+    background-color: #e0e0e0;
+}
+
+/* 单选按钮（缩略图尺寸切换） */
+QRadioButton {
+    spacing: 4px;
+    padding: 2px 8px;
+}
+
+QRadioButton::indicator {
+    width: 14px;
+    height: 14px;
+}
+
+/* 输入框 */
+QLineEdit {
+    border: 1px solid #d0d0d0;
+    border-radius: 4px;
+    padding: 4px 8px;
+    background-color: #ffffff;
+}
+
+QLineEdit:focus {
+    border-color: #0078d4;
+}
+
+/* 折叠面板标题 */
+CollapsibleSection > QToolButton {
+    background-color: #e8e8e8;
+    border: none;
+    border-radius: 0;
+    padding: 6px 8px;
+    font-weight: bold;
+    text-align: left;
+}
+
+CollapsibleSection > QToolButton:hover {
+    background-color: #e0e0e0;
+}
+
+CollapsibleSection > QToolButton:checked {
+    background-color: #e8e8e8;
+}
+
+/* 侧边栏 */
+QTreeWidget, QListWidget {
+    background-color: #fafafa;
+    border: none;
+    outline: none;
+}
+
+QTreeWidget::item, QListWidget::item {
+    padding: 3px 4px;
+    border-radius: 2px;
+}
+
+QTreeWidget::item:selected, QListWidget::item:selected {
+    background-color: #e5f1fb;
+    color: #1a1a1a;
+}
+
+QTreeWidget::item:hover, QListWidget::item:hover {
+    background-color: #f0f0f0;
+}
+
+/* 缩略图网格 */
+QListWidget#thumbnail_list {
+    background-color: #f5f5f5;
+    border: none;
+    outline: none;
+}
+
+/* 属性面板 */
+QGroupBox {
+    border: 1px solid #e0e0e0;
+    border-radius: 4px;
+    margin-top: 8px;
+    padding-top: 12px;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    padding: 0 4px;
+}
+
+/* 状态栏 */
+QStatusBar {
+    background-color: #ffffff;
+    border-top: 1px solid #e0e0e0;
+    color: #666666;
+    font-size: 8.5pt;
+}
+
+/* 滚动条 */
+QScrollBar:vertical {
+    width: 8px;
+    background: transparent;
+}
+
+QScrollBar::handle:vertical {
+    background: #c0c0c0;
+    border-radius: 4px;
+    min-height: 30px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: #a0a0a0;
+}
+
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical {
+    height: 0;
+}
+
+QScrollBar:horizontal {
+    height: 8px;
+    background: transparent;
+}
+
+QScrollBar::handle:horizontal {
+    background: #c0c0c0;
+    border-radius: 4px;
+    min-width: 30px;
+}
+
+QScrollBar::handle:horizontal:hover {
+    background: #a0a0a0;
+}
+
+QScrollBar::add-line:horizontal,
+QScrollBar::sub-line:horizontal {
+    width: 0;
+}
+
+/* 右键菜单 */
+QMenu {
+    background-color: #ffffff;
+    border: 1px solid #d0d0d0;
+    border-radius: 4px;
+    padding: 4px 0;
+}
+
+QMenu::item {
+    padding: 6px 24px 6px 12px;
+}
+
+QMenu::item:selected {
+    background-color: #e5f1fb;
+}
+
+QMenu::separator {
+    height: 1px;
+    background-color: #e0e0e0;
+    margin: 4px 8px;
+}
+
+/* 拆分器手柄 */
+QSplitter::handle {
+    background-color: #e0e0e0;
+}
+
+QSplitter::handle:horizontal {
+    width: 1px;
+}
+
+QSplitter::handle:vertical {
+    height: 1px;
+}

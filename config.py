@@ -25,7 +25,7 @@ DB_HOST = os.environ.get("IG_DB_HOST", "localhost")
 DB_PORT = int(os.environ.get("IG_DB_PORT", "5432"))
 DB_NAME = os.environ.get("IG_DB_NAME", "imagegallery")
 DB_USER = os.environ.get("IG_DB_USER", "gallery")
-DB_PASSWORD = os.environ.get("IG_DB_PASSWORD", "gallery123")
+DB_PASSWORD = os.environ.get("IG_DB_PASSWORD", "")
 
 DATABASE_URL = f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 

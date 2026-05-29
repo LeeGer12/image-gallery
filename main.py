@@ -1,5 +1,6 @@
 import logging
 import sys
+from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
@@ -18,6 +19,11 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
+
+    # 加载全局样式
+    style_path = Path(__file__).parent / "assets" / "style.qss"
+    if style_path.exists():
+        app.setStyleSheet(style_path.read_text(encoding="utf-8"))
 
     from ui.main_window import MainWindow
 

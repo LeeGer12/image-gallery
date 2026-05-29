@@ -122,32 +122,57 @@ class PropertyPanel(QWidget):
         self._clear_display()
 
     def show_image(self, image_id: int, db: Session):
-        """显示指定图片的属性。"""
+        """显示指定图片的属性（同步，供内部使用）。"""
         image = db.get(Image, image_id)
         if not image:
             self._clear_display()
             return
 
+        data = {
+            "file_name": image.file_name,
+            "file_path": image.file_path,
+            "file_size": image.file_size,
+            "width": image.width,
+            "height": image.height,
+            "format": image.format,
+            "color_space": image.color_space,
+            "created_at": image.created_at,
+            "modified_at": image.modified_at,
+            "exif_json": image.exif_json,
+            "project_type": image.project_type,
+            "style_name": image.style_name,
+            "imported": image.imported,
+            "storage_path": image.storage_path,
+            "thumb_path": image.thumb_path,
+        }
+        self.show_image_from_data(data)
+
+    def show_image_from_data(self, data: dict | None):
+        """从字典数据显示图片属性（异步回调使用）。"""
+        if not data:
+            self._clear_display()
+            return
+
         # 预览图
-        self._load_preview(image)
+        self._load_preview_from_data(data)
 
         # 基本信息
-        self._lbl_name.setText(image.file_name)
-        self._lbl_path.setText(image.file_path)
-        self._lbl_size.setText(_format_size(image.file_size))
-        self._lbl_dim.setText(
-            f"{image.width} × {image.height}" if image.width else "未知"
-        )
-        self._lbl_format.setText(image.format or "未知")
-        self._lbl_color.setText(image.color_space or "未知")
-        self._lbl_created.setText(_format_datetime(image.created_at))
-        self._lbl_modified.setText(_format_datetime(image.modified_at))
+        self._lbl_name.setText(data.get("file_name", ""))
+        self._lbl_path.setText(data.get("file_path", ""))
+        self._lbl_size.setText(_format_size(data.get("file_size")))
+        w, h = data.get("width"), data.get("height")
+        self._lbl_dim.setText(f"{w} × {h}" if w else "未知")
+        self._lbl_format.setText(data.get("format") or "未知")
+        self._lbl_color.setText(data.get("color_space") or "未知")
+        self._lbl_created.setText(_format_datetime(data.get("created_at")))
+        self._lbl_modified.setText(_format_datetime(data.get("modified_at")))
 
         # EXIF
         self._clear_exif()
-        if image.exif_json:
+        exif_json = data.get("exif_json")
+        if exif_json:
             try:
-                exif = json.loads(image.exif_json)
+                exif = json.loads(exif_json)
                 for key, value in exif.items():
                     lbl = QLabel(str(value))
                     lbl.setWordWrap(True)
@@ -156,10 +181,10 @@ class PropertyPanel(QWidget):
                 pass
 
         # 分类信息
-        self._lbl_project_type.setText(image.project_type or "未设置")
-        self._lbl_style.setText(image.style_name or "未设置")
-        self._lbl_imported.setText("是" if image.imported else "否")
-        self._lbl_storage.setText(image.storage_path or "无")
+        self._lbl_project_type.setText(data.get("project_type") or "未设置")
+        self._lbl_style.setText(data.get("style_name") or "未设置")
+        self._lbl_imported.setText("是" if data.get("imported") else "否")
+        self._lbl_storage.setText(data.get("storage_path") or "无")
 
         self._info_group.show()
         self._exif_group.show()
@@ -167,17 +192,28 @@ class PropertyPanel(QWidget):
 
     def _load_preview(self, image: Image):
         """加载预览图，宽度跟随面板"""
+        data = {
+            "thumb_path": image.thumb_path,
+            "file_path": image.file_path,
+            "file_size": image.file_size,
+        }
+        self._load_preview_from_data(data)
+
+    def _load_preview_from_data(self, data: dict):
+        """从字典数据加载预览图"""
         pixmap = None
 
-        if image.thumb_path and Path(image.thumb_path).exists():
-            pixmap = QPixmap(image.thumb_path)
+        thumb_path = data.get("thumb_path")
+        if thumb_path and Path(thumb_path).exists():
+            pixmap = QPixmap(thumb_path)
 
-        if (pixmap is None or pixmap.isNull()) and image.file_size:
-            if image.file_size < 20 * 1024 * 1024:
-                pixmap = QPixmap(image.file_path)
+        file_path = data.get("file_path")
+        file_size = data.get("file_size")
+        if (pixmap is None or pixmap.isNull()) and file_size:
+            if file_size < 20 * 1024 * 1024 and file_path:
+                pixmap = QPixmap(file_path)
 
         if pixmap and not pixmap.isNull():
-            # 宽度跟随面板，高度自适应
             panel_width = max(self.width() - 20, 100)
             scaled = pixmap.scaledToWidth(
                 min(panel_width, pixmap.width()),
