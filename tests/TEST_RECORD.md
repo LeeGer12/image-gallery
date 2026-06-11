@@ -1,6 +1,8 @@
-# Image Gallery 功能测试记录
+# Image Gallery 功能测试记录（Phase 1-4）
 
 更新时间：2026-05-28
+
+> Phase 5 测试记录见 [TEST_PHASE5.md](TEST_PHASE5.md)（63/63 通过，2026-06-11）
 
 ---
 
