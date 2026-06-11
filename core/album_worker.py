@@ -4,7 +4,7 @@ from PySide6.QtCore import QObject, Signal
 from sqlalchemy import select, update
 
 from core.database import SessionLocal
-from core.models import Album, Folder, Image, album_image_table
+from core.models import Album, Folder, Image, OperationLog, album_image_table
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +24,12 @@ class AlbumWorker(QObject):
     error = Signal(str)
     album_created = Signal(int)
     albums_changed = Signal()
+    conflict_images = Signal(list)  # 冲突的 image_id 列表
 
-    def __init__(self, operation: str, **kwargs):
+    def __init__(self, operation: str, user_id: int | None = None, **kwargs):
         super().__init__()
         self._operation = operation
+        self._user_id = user_id
         self._kwargs = kwargs
         self._cancelled = False
 
@@ -52,6 +54,16 @@ class AlbumWorker(QObject):
             elif self._operation == "delete_folder":
                 self._delete_folder(db)
             db.commit()
+
+            # 记录操作日志
+            if self._user_id:
+                log = OperationLog(
+                    user_id=self._user_id, action=self._operation,
+                    target_desc=f"{self._operation}: {list(self._kwargs.keys())}"
+                )
+                db.add(log)
+                db.commit()
+
             self.albums_changed.emit()
             self.finished.emit()
         except Exception as e:
@@ -64,7 +76,7 @@ class AlbumWorker(QObject):
     def _create(self, db):
         name = self._kwargs["name"]
         description = self._kwargs.get("description", "")
-        album = Album(name=name, description=description)
+        album = Album(name=name, description=description, created_by=self._user_id)
         db.add(album)
         db.flush()
         album_id = album.id
@@ -101,30 +113,58 @@ class AlbumWorker(QObject):
         project_type = self._kwargs.get("project_type", "")
         style_name = self._kwargs.get("style_name", "")
         only_empty = self._kwargs.get("only_empty", True)
+        force = self._kwargs.get("force", False)
+        expected_versions = self._kwargs.get("expected_versions", {})
 
         images = db.execute(
             select(Image).where(Image.id.in_(image_ids))
         ).scalars().all()
+
+        if not force and expected_versions:
+            conflicts = []
+            for image in images:
+                expected = expected_versions.get(image.id)
+                if expected is not None and image.version != expected:
+                    conflicts.append(image.id)
+            if conflicts:
+                self.conflict_images.emit(conflicts)
+                return
+
         for image in images:
             if self._cancelled:
                 break
             _set_field(image, "project_type", project_type, only_empty)
             _set_field(image, "style_name", style_name, only_empty)
+            image.version += 1
 
     def _quick_classify(self, db):
         """快速分类：直接覆盖设置 project_type/style_name"""
         image_ids = self._kwargs["image_ids"]
         project_type = self._kwargs.get("project_type", "")
         style_name = self._kwargs.get("style_name", "")
+        force = self._kwargs.get("force", False)
+        expected_versions = self._kwargs.get("expected_versions", {})
 
         images = db.execute(
             select(Image).where(Image.id.in_(image_ids))
         ).scalars().all()
+
+        if not force and expected_versions:
+            conflicts = []
+            for image in images:
+                expected = expected_versions.get(image.id)
+                if expected is not None and image.version != expected:
+                    conflicts.append(image.id)
+            if conflicts:
+                self.conflict_images.emit(conflicts)
+                return
+
         for image in images:
             if self._cancelled:
                 break
             image.project_type = project_type
             image.style_name = style_name
+            image.version += 1
 
     def _delete_folder(self, db):
         """删除索引：已导入图片保留(folder_id=NULL)，未导入图片记录删除，Folder记录删除"""

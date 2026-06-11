@@ -20,11 +20,12 @@ class ImportDialog(QDialog):
 
     import_finished = Signal()
 
-    def __init__(self, image_ids: list[int], parent=None):
+    def __init__(self, image_ids: list[int], parent=None, user_id: int | None = None):
         super().__init__(parent)
         self.setWindowTitle("导入到库")
         self.setMinimumWidth(450)
         self._image_ids = image_ids
+        self._user_id = user_id
         self._thread = None
         self._worker = None
 
@@ -103,7 +104,7 @@ class ImportDialog(QDialog):
         self._progress_bar.setVisible(True)
 
         self._thread = QThread()
-        self._worker = ImportWorker(self._image_ids, project, ptype, style)
+        self._worker = ImportWorker(self._image_ids, project, ptype, style, user_id=self._user_id)
         self._worker.moveToThread(self._thread)
 
         self._worker.progress.connect(self._on_progress)

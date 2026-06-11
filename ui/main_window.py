@@ -27,6 +27,7 @@ from core.models import Album, Folder, Image
 from core.queries import get_distinct_classifications, parse_classify_key
 from core.query_worker import abort_query, run_query
 from core.scanner import ScanWorker
+from core.session import get_current_user, get_current_user_id, is_admin
 from ui.image_viewer import ImageViewerDialog
 from ui.property_panel import PropertyPanel
 from ui.thumbnail_grid import ThumbnailGrid
@@ -58,9 +59,9 @@ class MainWindow(QMainWindow):
         toolbar = QToolBar()
         self.addToolBar(toolbar)
 
-        btn_add = QPushButton("添加文件夹")
-        btn_add.clicked.connect(self._on_add_folder)
-        toolbar.addWidget(btn_add)
+        self._btn_add = QPushButton("添加文件夹")
+        self._btn_add.clicked.connect(self._on_add_folder)
+        self._act_add = toolbar.addWidget(self._btn_add)
 
         btn_new_album = QPushButton("新建相册")
         btn_new_album.clicked.connect(self._on_create_album)
@@ -98,6 +99,12 @@ class MainWindow(QMainWindow):
         self._btn_zip.setEnabled(False)
         self._btn_zip.clicked.connect(self._on_zip_download)
         toolbar.addWidget(self._btn_zip)
+
+        toolbar.addSeparator()
+
+        self._btn_users = QPushButton("用户管理")
+        self._btn_users.clicked.connect(self._on_user_manage)
+        self._act_users = toolbar.addWidget(self._btn_users)
 
     def _setup_central_widget(self):
         central = QWidget()
@@ -240,6 +247,60 @@ class MainWindow(QMainWindow):
         self._statusbar = QStatusBar()
         self.setStatusBar(self._statusbar)
         self._statusbar.showMessage("就绪")
+
+        # 当前用户显示
+        user = get_current_user()
+        if user:
+            role_text = "管理员" if user["role"] == "admin" else "普通用户"
+            display = user.get("display_name") or user["username"]
+            self._user_label = QLabel(f"  {user['username']} ({role_text}:{display})  ")
+            self._user_label.setStyleSheet("padding: 0 8px;")
+            self._user_label.mousePressEvent = self._on_user_label_clicked
+            self._statusbar.addPermanentWidget(self._user_label)
+
+        # 应用角色权限
+        self._apply_role_permissions()
+
+    def _apply_role_permissions(self):
+        """根据当前用户角色控制 UI 元素可见性"""
+        admin = is_admin()
+        self._act_add.setVisible(admin)
+        self._act_users.setVisible(admin)
+
+    def _on_user_label_clicked(self, event):
+        """点击状态栏用户名，修改显示名"""
+        user = get_current_user()
+        if not user:
+            return
+        from PySide6.QtWidgets import QInputDialog
+        current_display = user.get("display_name") or user["username"]
+        new_name, ok = QInputDialog.getText(
+            self, "修改显示名", "显示名称:", text=current_display
+        )
+        if ok and new_name.strip():
+            def update_name(db):
+                from core.models import User
+                u = db.get(User, user["id"])
+                if u:
+                    u.display_name = new_name.strip()
+                    db.commit()
+                    return True
+                return False
+
+            def on_done(result):
+                if result:
+                    from core.session import set_current_user
+                    set_current_user(user["id"], user["username"], user["role"], new_name.strip())
+                    role_text = "管理员" if user["role"] == "admin" else "普通用户"
+                    self._user_label.setText(f"  {user['username']} ({role_text}:{new_name.strip()})  ")
+
+            run_query(self, update_name, on_result=on_done)
+
+    def _on_user_manage(self):
+        """打开用户管理对话框"""
+        from ui.user_manage_dialog import UserManageDialog
+        dialog = UserManageDialog(self)
+        dialog.exec()
 
     def _load_sidebar_folders(self):
         """从数据库加载侧边栏各区块内容（异步）"""
@@ -506,7 +567,7 @@ class MainWindow(QMainWindow):
         self._statusbar.showMessage(f"正在扫描: {folder_path} ...")
 
         self._scan_thread = QThread()
-        self._scan_worker = ScanWorker(folder_id)
+        self._scan_worker = ScanWorker(folder_id, user_id=get_current_user_id())
         self._scan_worker.moveToThread(self._scan_thread)
 
         self._scan_worker.progress.connect(self._on_scan_progress)
@@ -555,9 +616,15 @@ class MainWindow(QMainWindow):
 
     def _query_image_detail(self, db, image_id: int):
         """查询图片详情（后台线程）"""
+        from core.models import User
         image = db.get(Image, image_id)
         if not image:
             return None
+        imported_by_name = "未知"
+        if image.imported_by:
+            user = db.get(User, image.imported_by)
+            if user:
+                imported_by_name = user.display_name or user.username
         return {
             "file_name": image.file_name,
             "file_path": image.file_path,
@@ -572,6 +639,7 @@ class MainWindow(QMainWindow):
             "project_type": image.project_type,
             "style_name": image.style_name,
             "imported": image.imported,
+            "imported_by_name": imported_by_name,
             "storage_path": image.storage_path,
             "thumb_path": image.thumb_path,
         }
@@ -652,11 +720,12 @@ class MainWindow(QMainWindow):
             return
 
         menu = QMenu(self)
-        action = menu.addAction("删除索引")
-        triggered = menu.exec(self._folders_list.viewport().mapToGlobal(pos))
-        if triggered == action:
-            folder_id = int(data.split(":")[1])
-            self._on_delete_folder(folder_id)
+        if is_admin():
+            action = menu.addAction("删除索引")
+            triggered = menu.exec(self._folders_list.viewport().mapToGlobal(pos))
+            if triggered == action:
+                folder_id = int(data.split(":")[1])
+                self._on_delete_folder(folder_id)
 
     def _on_delete_folder(self, folder_id: int):
         """删除索引文件夹"""
@@ -727,9 +796,15 @@ class MainWindow(QMainWindow):
             return
 
         def delete_records(db):
-            db.query(Image).filter(Image.id.in_(image_ids)).delete(synchronize_session=False)
+            from core.models import OperationLog
+            count = db.query(Image).filter(Image.id.in_(image_ids)).delete(synchronize_session=False)
+            uid = get_current_user_id()
+            if uid:
+                log = OperationLog(user_id=uid, action="delete_records",
+                                   target_desc=f"删除 {count} 条图片记录")
+                db.add(log)
             db.commit()
-            return len(image_ids)
+            return count
 
         def on_done():
             self._statusbar.showMessage("已删除记录")
@@ -771,14 +846,23 @@ class MainWindow(QMainWindow):
         project_type, style_name, only_empty = dialog.get_data()
         if not project_type and not style_name:
             return
-        self._run_album_worker("update_metadata", image_ids=image_ids,
-                               project_type=project_type,
-                               style_name=style_name, only_empty=only_empty)
+        # 先查询当前 version，用于乐观锁
+        def query_versions(db):
+            imgs = db.query(Image.id, Image.version).filter(Image.id.in_(image_ids)).all()
+            return {img.id: img.version for img in imgs}
+
+        def on_versions(versions):
+            self._run_album_worker("update_metadata", image_ids=image_ids,
+                                   project_type=project_type,
+                                   style_name=style_name, only_empty=only_empty,
+                                   expected_versions=versions)
+
+        run_query(self, query_versions, on_result=on_versions)
 
     def _on_import_images(self, image_ids: list):
         """导入图片到库"""
         from ui.import_dialog import ImportDialog
-        dialog = ImportDialog(image_ids, self)
+        dialog = ImportDialog(image_ids, self, user_id=get_current_user_id())
         dialog.import_finished.connect(self._on_import_finished)
         dialog.exec()
 
@@ -797,13 +881,16 @@ class MainWindow(QMainWindow):
             self._album_thread = None
             self._album_worker = None
 
+        self._last_album_op = (operation, kwargs)
+
         self._album_thread = QThread()
-        self._album_worker = AlbumWorker(operation, **kwargs)
+        self._album_worker = AlbumWorker(operation, user_id=get_current_user_id(), **kwargs)
         self._album_worker.moveToThread(self._album_thread)
 
         self._album_worker.finished.connect(self._on_album_worker_finished)
         self._album_worker.error.connect(self._on_album_worker_error)
         self._album_worker.albums_changed.connect(self._load_sidebar_folders)
+        self._album_worker.conflict_images.connect(self._on_conflict_images)
 
         self._album_thread.started.connect(self._album_worker.run)
         self._album_thread.start()
@@ -815,6 +902,19 @@ class MainWindow(QMainWindow):
     def _on_album_worker_error(self, msg: str):
         self._statusbar.showMessage(f"操作失败: {msg}")
         self._cleanup_album_thread()
+
+    def _on_conflict_images(self, conflict_ids: list):
+        """处理乐观锁冲突"""
+        reply = QMessageBox.question(
+            self, "数据冲突",
+            f"有 {len(conflict_ids)} 张图片已被其他用户修改。\n是否强制覆盖？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            if hasattr(self, '_last_album_op'):
+                operation, kwargs = self._last_album_op
+                kwargs["force"] = True
+                self._run_album_worker(operation, **kwargs)
 
     def _cleanup_album_thread(self):
         if hasattr(self, '_album_thread'):

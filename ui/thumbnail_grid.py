@@ -465,7 +465,10 @@ class ThumbnailGrid(QWidget):
         menu.addAction("复制文件路径").setData("copy_path")
         menu.addAction("在资源管理器中打开").setData("open_in_explorer")
         menu.addSeparator()
-        menu.addAction("删除记录").setData("delete_records")
+
+        from core.session import is_admin
+        if is_admin():
+            menu.addAction("删除记录").setData("delete_records")
 
         action = menu.exec(self.list_widget.mapToGlobal(pos))
         if action and action.data():
@@ -487,8 +490,10 @@ class ThumbnailGrid(QWidget):
                 if img_id is not None:
                     self.image_double_clicked.emit(img_id)
         elif key == Qt.Key.Key_Delete:
-            selected = self.get_selected_image_ids()
-            if selected:
-                self.context_action.emit("delete_records", selected)
+            from core.session import is_admin
+            if is_admin():
+                selected = self.get_selected_image_ids()
+                if selected:
+                    self.context_action.emit("delete_records", selected)
         else:
             super().keyPressEvent(event)

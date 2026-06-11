@@ -100,6 +100,7 @@ class PropertyPanel(QWidget):
         self._lbl_project_type = QLabel()
         self._lbl_style = QLabel()
         self._lbl_imported = QLabel()
+        self._lbl_imported_by = QLabel()
         self._lbl_storage = QLabel()
         self._lbl_storage.setWordWrap(True)
         self._lbl_storage.setTextInteractionFlags(
@@ -108,6 +109,7 @@ class PropertyPanel(QWidget):
         meta_form.addRow("项目类型:", self._lbl_project_type)
         meta_form.addRow("风格:", self._lbl_style)
         meta_form.addRow("已导入:", self._lbl_imported)
+        meta_form.addRow("导入者:", self._lbl_imported_by)
         meta_form.addRow("导入路径:", self._lbl_storage)
         self._meta_group.setLayout(meta_form)
         self._layout.addWidget(self._meta_group)
@@ -184,6 +186,7 @@ class PropertyPanel(QWidget):
         self._lbl_project_type.setText(data.get("project_type") or "未设置")
         self._lbl_style.setText(data.get("style_name") or "未设置")
         self._lbl_imported.setText("是" if data.get("imported") else "否")
+        self._lbl_imported_by.setText(data.get("imported_by_name") or "未知")
         self._lbl_storage.setText(data.get("storage_path") or "无")
 
         self._info_group.show()
@@ -238,6 +241,7 @@ class PropertyPanel(QWidget):
         self._lbl_project_type.setText("")
         self._lbl_style.setText("")
         self._lbl_imported.setText("")
+        self._lbl_imported_by.setText("")
         self._lbl_storage.setText("")
         self._info_group.hide()
         self._exif_group.hide()

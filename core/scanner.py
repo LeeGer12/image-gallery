@@ -6,7 +6,7 @@ from PySide6.QtCore import QObject, Signal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from core.models import Folder, Image
+from core.models import Folder, Image, OperationLog
 from core.database import SessionLocal
 from utils.image_utils import is_supported_image, read_image_info
 
@@ -21,9 +21,10 @@ class ScanWorker(QObject):
     finished = Signal()
     error = Signal(str)
 
-    def __init__(self, folder_id: int):
+    def __init__(self, folder_id: int, user_id: int | None = None):
         super().__init__()
         self.folder_id = folder_id
+        self._user_id = user_id
         self._cancelled = False
 
     def cancel(self):
@@ -97,6 +98,16 @@ class ScanWorker(QObject):
             db.commit()
 
             logger.info("扫描完成: %s, 新增 %d 张图片", folder.path, count)
+
+            # 记录操作日志
+            if self._user_id:
+                log = OperationLog(
+                    user_id=self._user_id, action="scan",
+                    target_desc=f"扫描文件夹: {folder.path}, 新增 {count} 张"
+                )
+                db.add(log)
+                db.commit()
+
             self.finished.emit()
 
         except Exception as e:

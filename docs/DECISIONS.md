@@ -91,3 +91,51 @@
 - README.md 给人看（如何运行）
 - docs/DECISIONS.md 记录决策（避免重复讨论）
 - docs/PLAN_TEMPLATE.md 计划模板（规范开发流程）
+
+## 9. 管理员密码：PBKDF2-SHA256
+
+**决策时间**：2026-05-29
+
+**选择**：管理员有密码保护，普通用户无密码选择即登录
+
+**原因**：
+- 公司环境需要管理员操作（删除用户、删除索引等）有身份验证
+- 普通用户仅浏览和编辑分类，无需密码
+- 使用 Python 标准库 `hashlib.pbkdf2_hmac`，无额外依赖
+- 密码哈希格式 `salt_hex:hash_hex`，100000 轮迭代
+
+## 10. 用户会话：进程级内存单例
+
+**决策时间**：2026-05-29
+
+**选择**：`core/session.py` 用全局变量存储当前用户，不持久化
+
+**原因**：
+- 无密码体系下无需持久化登录状态
+- 每次启动都要选择用户，最简方案
+- 存储 id、username、role、display_name 四个字段
+
+## 11. 局域网配置：settings.json + 配置向导
+
+**决策时间**：2026-06-11
+
+**选择**：首次启动弹出配置向导，输入中枢电脑 IP，保存到 `~/.image_gallery/settings.json`
+
+**原因**：
+- 同事不懂代码，不能手动设环境变量
+- settings.json 是最简单的持久化方案（无需额外库）
+- 局域网模式下数据库账号密码写死（`gallery` / `ImageGallery2026`），同事只需输入 IP
+- 本地开发模式下仍支持环境变量，保持向后兼容
+- `config.py` 优先读 settings.json，fallback 到环境变量
+
+## 12. 引擎重建：rebuild_engine()
+
+**决策时间**：2026-06-11
+
+**选择**：`database.py` 新增 `rebuild_engine()` 函数，支持运行时重建数据库引擎
+
+**原因**：
+- `config.py` 在 import 时读取配置，值会冻结
+- 配置向导完成后需要切换到新的数据库连接
+- `rebuild_engine()` 先 `dispose()` 旧引擎，再用新配置创建新引擎
+- `main.py` 中先 `importlib.reload(config)` 再 `rebuild_engine()`，确保配置生效
